@@ -68,7 +68,7 @@ python main.py analytics --config path/to/config.json
 ```
 - Run Reporting Job:
 ```bash
-python main.py reporting --reporting --output channel_basic_a2
+python main.py reporting --max-poll-time 60 --format csv --output channel_basic_a2 --report-type-id channel_basic_a2
 ```
 
 ## Running Test
