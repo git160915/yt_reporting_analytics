@@ -6,19 +6,23 @@ It uses Typer to provide commands for fetching YouTube Analytics and running Rep
 
 New Features:
   - The analytics command accepts a --config option for a JSON file with video IDs.
-  - The analytics command now supports a --format option (json or csv) to determine the output format.
+  - The analytics command supports a --format option (json or csv) to determine the output format.
   - When outputting CSV, the video id is added as the first column.
   - Both analytics and reporting commands support an --output option.
     For analytics, each video's result is saved to a file named with the base provided,
     the video id, and the current local timestamp (formatted as _YYYYMMDD_HHMMSS).
-  - The reporting command appends a timestamp (_YYYYMMDD_HHMMSS) to the output filename specified by --output.
-
+  - The reporting command will either use an existing job (via --job-id) or, if not provided,
+    search for or create a reporting job based on the report type.
+  - The reporting command polls for available reports and downloads them.
+  - When --output is provided for reporting, each downloaded report is saved with a timestamp.
+  
 Logging is enabled to provide insight into the program’s flow.
 """
 
 import csv
 import json
 import logging
+import time
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -177,9 +181,13 @@ def reporting(
     This command can either list available report types and jobs (using --list-only)
     or run the reporting job with various filters.
 
-    New Feature:
-      When --output is provided, the output filename will have the current local date and time appended
-      (formatted as _YYYYMMDD_HHMMSS) before the file extension.
+    If --job-id is not provided, the command will try to find an existing reporting job with the specified
+    --report-type-id. If none is found, it will create a new one (or force creation if --force-new is specified).
+
+    The command then polls for available report files using the poll interval and max poll time specified.
+    
+    When --output is provided, the output filename will have the current local date and time appended
+    (formatted as _YYYYMMDD_HHMMSS) before the file extension.
     """
     if list_only:
         service = get_reporting_service()
@@ -191,19 +199,52 @@ def reporting(
         for job in list_reporting_jobs(service):
             typer.echo(f"Job ID: {job.get('id')}, Name: {job.get('name')}, Type: {job.get('reportTypeId')}")
     else:
-        # Simulate downloading report(s).
-        # Replace this with your actual polling and downloading logic.
-        processed = []
-        # Example: Simulate one report content; in practice, this list can have multiple items.
-        processed.append("sample,report,data")
+        poll_interval = 60
+        max_attempts = max_poll_time // poll_interval
 
-        # Create a timestamp string in the format YYYYMMDD_HHMMSS.
+        # Process start_date and end_date if provided.
+        s_date = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        e_date = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+
+        service = get_reporting_service()
+        used_job_id = None
+
+        if job_id:
+            used_job_id = job_id
+            logger.info(f"Using provided reporting job ID: {job_id}")
+        else:
+            if force_new:
+                logger.info(f"Force creating a new reporting job for report type {report_type_id}.")
+                job = create_reporting_job(service, report_type_id, "Forced New Report")
+                used_job_id = job["id"]
+            else:
+                logger.info("Searching for existing reporting job...")
+                jobs = list_reporting_jobs(service)
+                job = None
+                for j in jobs:
+                    if j.get("reportTypeId") == report_type_id:
+                        job = j
+                        break
+                if not job:
+                    logger.info(f"No existing job found for report type {report_type_id}, creating a new one.")
+                    job = create_reporting_job(service, report_type_id, f"Report {report_type_id}")
+                used_job_id = job["id"]
+
+        logger.info(f"Using reporting job ID: {used_job_id}")
+
+        # Poll and download report files.
+        reports = poll_and_download_reports(used_job_id, poll_interval, max_attempts, s_date, e_date)
+
+        if not reports:
+            typer.echo("No reports were downloaded.")
+            raise typer.Exit()
+
+        # Save downloaded reports.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
+        ext = format.lower()
         if output:
-            ext = format.lower()
-            if len(processed) > 1:
-                for i, report in enumerate(processed, 1):
+            if len(reports) > 1:
+                for i, report in enumerate(reports, start=1):
                     filename = f"{output}_{timestamp}_{i}.{ext}"
                     with open(filename, "w", encoding="utf-8") as f:
                         f.write(report)
@@ -211,10 +252,10 @@ def reporting(
             else:
                 filename = f"{output}_{timestamp}.{ext}"
                 with open(filename, "w", encoding="utf-8") as f:
-                    f.write(processed[0])
+                    f.write(reports[0])
                 typer.echo(f"Saved to {filename}")
         else:
-            for i, report in enumerate(processed, 1):
+            for i, report in enumerate(reports, start=1):
                 typer.echo(f"--- Report {i} ---\n{report}")
 
 
